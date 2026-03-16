@@ -27,10 +27,10 @@ void ALidarSensorManager::Tick(float DeltaTime)
 void ALidarSensorManager::Configure(TMap<FString, FInnerConfig> Configurations, AGEMSTARRoot* Root) {
 	GemstarRoot = Root;
 
-	for (const TPair<FName, FInnerConfig>& Pair : Configurations)
+	for (const TPair<FString, FInnerConfig>& Pair : Configurations)
 	{
 		FSensorConfigData config;
-		config.ID = Pair.Key;
+		config.ID = FName(*Pair.Key);
 		if (const FString* ValueStr = Pair.Value.Entries.Find("Mount")) {
 			config.Mount = *ValueStr;
 		}
