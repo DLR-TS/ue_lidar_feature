@@ -1,19 +1,22 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+/*
+ * Copyright (c) 2026 DLR e.V.
+ *
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ */
 
 #include "SimpleLidar.h"
+
+#include "Effects/LidarWeatherEffectModel.h"
+#include "PhysicsPublic.h"
+#include "Materials/Material.h"
 
 // Sets default values
 ASimpleLidar::ASimpleLidar()
 {
-	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
-	PrimaryActorTick.bCanEverTick = true;
-
-	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
-}
-
-void ASimpleLidar::AddDataTarget(AActor* dataTarget) {
-	sensorConfiguration.DataTargets.AddUnique(dataTarget);
 }
 
 // Called when the game starts or when spawned
@@ -26,14 +29,19 @@ void ASimpleLidar::BeginPlay()
 	TraceParams = FCollisionQueryParams(TEXT("LaserTrace"), true, GetOwner());
 	TraceParams.bReturnPhysicalMaterial = true;
 	TraceParams.bTraceComplex = true;
+	TraceParams.bReturnFaceIndex = true;
 }
 
 void ASimpleLidar::Tick(float time) {
+	if (!TickActive) return;
 	GetScanData();
 	if (bDebugRayTraces || bDebugReflections || bDebugNormals)
 		ShowSensorDebugInformation();
-	GenerateOSIMessage();
-	SendData();
+	if (PublishingActive)
+	{
+		GenerateOSIMessage();
+		SendData(*Sensor.SensorView);
+	}
 }
 
 void ASimpleLidar::GetScanData() {
@@ -64,8 +72,8 @@ void ASimpleLidar::GetScanData() {
 			}
 
 			for (int32 Index = StartAt; Index < EndAt; ++Index) {
-				const float HAngle = Sensor.AzimuthAngles[Index / Sensor.Number_of_rays_vertical];
-				const float VAngle = Sensor.ElevationAngles[Index % Sensor.Number_of_rays_vertical];
+				const float HAngle = Sensor.AzimuthAngles[Index % Sensor.Number_of_rays_horizontal];
+				const float VAngle = Sensor.ElevationAngles[Index / Sensor.Number_of_rays_horizontal];
 
 				FRotator LaserRotation(FMath::RadiansToDegrees(VAngle), FMath::RadiansToDegrees(HAngle), 0.f);
 				FRotator Rotation = UKismetMathLibrary::ComposeRotators(LaserRotation, LidarRotation);
@@ -121,6 +129,12 @@ void ASimpleLidar::GenerateOSIMessage() {
 		moving_object->mutable_base()->set_allocated_orientation(ToOSI::Orientation3d(Parent->GetActorQuat()));
 		Sensor.SensorView->mutable_global_ground_truth()->mutable_host_vehicle_id()->set_value(uniqueID);
 	}
+
+	//apply weathereffect
+	if (HasWeatherData && Sensor.SensorView) {
+		LidarWeatherEffectModel LidarWeatherEffectModel;
+		LidarWeatherEffectModel.ApplyLidarWeatherEffect(*Sensor.SensorView, LatestWeatherData);
+	}
 }
 
 float ASimpleLidar::ComputeLidarSignalStrength(const FHitResult& Hit)
@@ -131,31 +145,80 @@ float ASimpleLidar::ComputeLidarSignalStrength(const FHitResult& Hit)
 	// Vector from hit point back to lidar (return direction)
 	FVector ToLidar = (Hit.TraceStart - Hit.ImpactPoint).GetSafeNormal();
 
-	// Angle factor: cos(theta); clamp to [0,1]
-	float AngleFactor = FVector::DotProduct(Normal, ToLidar);
+	// Angle factor: cos^2(theta), clamped to [0,1]
+	float CosTheta = FVector::DotProduct(Normal, ToLidar);
+	CosTheta = FMath::Clamp(CosTheta, 0.0f, 1.0f);
+	float AngleFactor = FMath::Square(CosTheta);
 	AngleFactor = FMath::Clamp(AngleFactor, 0.0f, 1.0f);
 
 	// Distance attenuation: 1 / (1 + (d/d0)^2)
 	float DistanceFactor = 1.0f / (1.0f + FMath::Square(Hit.Distance / DistanceHalfFalloff));
 
-	// Final signal strength
-	float Signal = AngleFactor * DistanceFactor;
-
+	float Rho = 1.0f; // default backscatter coefficient
+	if (Hit.Component.IsValid() && Hit.Component.Get())
+	{
+		UMaterialInterface* HitMaterial = GetHitMaterial(Hit);
+		Rho = GetReflectivity(HitMaterial);
+	}
+	float Signal = Rho * AngleFactor * DistanceFactor;
 	return FMath::Clamp(Signal, 0.0f, 1.0f);
 }
 
-void ASimpleLidar::setSensorConfiguration(FSensorConfigData sensorConf) {
-	this->sensorConfiguration = sensorConf;
+UMaterialInterface* ASimpleLidar::GetHitMaterial(const FHitResult& Hit) const {
+
+	UMaterialInterface* HitMat = nullptr;
+	UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Hit.Component.Get());
+	if (!PrimComp)
+	{
+		return nullptr;
+	}
+	if (PrimComp && Hit.FaceIndex != INDEX_NONE)
+	{
+		int32 SectionIndex = INDEX_NONE;
+		HitMat = PrimComp->GetMaterialFromCollisionFaceIndex(Hit.FaceIndex, SectionIndex);
+		if (HitMat)
+		{
+			return HitMat;
+		}
+	}
+	if (!HitMat && PrimComp->GetNumMaterials() > 0)
+	{
+		return PrimComp->GetMaterial(0);
+	}
+	return nullptr;
+}
+
+float ASimpleLidar::GetReflectivity(const UMaterialInterface* Material) const {
+
+	float Rho = 1.0f; // default backscatter coefficient
+	if (Material) {
+		float Reflectivity = 1.0f; // Lidar Unreal Material Reflectivity
+		float Roughness = 1.0f;
+		float Metallic = 1.0f;
+		if (Material->GetScalarParameterValue(TEXT("LidarReflectivity"), Reflectivity)) {
+			return  FMath::Clamp(Reflectivity, 0.0f, 1.0f);
+		}
+		else if (Material->GetScalarParameterValue(TEXT("Roughness"), Roughness) && Material->GetScalarParameterValue(TEXT("Metallic"), Metallic)) {
+			Rho = FMath::Clamp(0.1f + (1.0f - Roughness) * 0.6f - Metallic * 0.3f, 0.05f, 1.0f);
+		}
+	}
+	return  FMath::Clamp(Rho, 0.0f, 1.0f);
+}
+
+void ASimpleLidar::SetSensorConfiguration(FSensorConfigData NewSensorConfiguration)
+{
+	Super::SetSensorConfiguration(NewSensorConfiguration);
 	Sensor.SensorViewConfig->clear_lidar_sensor_view_configuration();
 	auto* conf = Sensor.SensorViewConfig->add_lidar_sensor_view_configuration();
-	conf->set_field_of_view_horizontal(sensorConfiguration.Lidar.FieldOfViewHorizontal);
-	conf->set_field_of_view_vertical(sensorConfiguration.Lidar.FieldOfViewVertical);
-	conf->set_number_of_rays_horizontal(sensorConfiguration.Lidar.NumberOfRaysHorizontal);
-	conf->set_number_of_rays_vertical(sensorConfiguration.Lidar.NumberOfRaysVertical);
+	conf->set_field_of_view_horizontal(SensorConfiguration.Lidar.FieldOfViewHorizontal);
+	conf->set_field_of_view_vertical(SensorConfiguration.Lidar.FieldOfViewVertical);
+	conf->set_number_of_rays_horizontal(SensorConfiguration.Lidar.NumberOfRaysHorizontal);
+	conf->set_number_of_rays_vertical(SensorConfiguration.Lidar.NumberOfRaysVertical);
 	conf->mutable_mounting_position()->set_allocated_position(
-		ToOSI::Position(sensorConfiguration.Offset.GetLocation()));
+		ToOSI::Position(SensorConfiguration.Offset.GetLocation()));
 	conf->mutable_mounting_position()->set_allocated_orientation(
-		ToOSI::Orientation3d(sensorConfiguration.Offset.GetRotation()));
+		ToOSI::Orientation3d(SensorConfiguration.Offset.GetRotation()));
+	Sensor.SensorViewConfig->set_range(NewSensorConfiguration.Lidar.Range);
 
 	//calculate angles
 	Sensor.AzimuthAngles.Empty();
@@ -174,7 +237,7 @@ void ASimpleLidar::setSensorConfiguration(FSensorConfigData sensorConf) {
 
 void ASimpleLidar::CreateTestConfig() {
 	Sensor.SensorViewConfig = new osi3::SensorViewConfiguration();
-	Sensor.SensorViewConfig->set_range(20);
+	Sensor.SensorViewConfig->set_range(Range);
 }
 
 void ASimpleLidar::ShowSensorDebugInformation() {
@@ -192,21 +255,5 @@ void ASimpleLidar::ShowSensorDebugInformation() {
 			noHitCounter++;
 		}
 	}
-	UE_LOG(LogTemp, Log, TEXT("No reflection from lidar: %d of %d"), noHitCounter, Sensor.RecordedHits.Num());
-}
-
-void ASimpleLidar::SendData() {
-	if (sensorConfiguration.DataTargets.Num() == 0) {
-		UE_LOG(LogTemp, Warning, TEXT("Lidar data target not configured! %s"), *GetName());
-		return;
-	}
-	FSensorView sensorViewData;
-	sensorViewData.sensorview = Sensor.SensorView;
-	for (auto& dataTarget : sensorConfiguration.DataTargets) {
-		ISensorDataUpdate::Execute_SensorViewDataUpdate(dataTarget, sensorViewData);
-	}
-}
-
-void ASimpleLidar::UpdateTransformAfterAttachment_Implementation() {
-	SetActorRelativeTransform(sensorConfiguration.Offset);
+	UE_LOG(Lidar, Log, TEXT("No reflection from lidar: %d of %d"), noHitCounter, Sensor.RecordedHits.Num());
 }

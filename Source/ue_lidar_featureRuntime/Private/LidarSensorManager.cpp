@@ -1,5 +1,12 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+/*
+ * Copyright (c) 2026 DLR e.V.
+ *
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ */
 
 #include "LidarSensorManager.h"
 
@@ -9,6 +16,34 @@ ALidarSensorManager::ALidarSensorManager()
 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = false;
 
+	AcceptChannel(GemstarInterfaceType::SENSORVIEW,
+		[this](FDataTarget& Target, const FString& Producer)
+		{
+			for (AActor* LidarActor : SpawnedActors)
+			{
+				if (!IsValid(LidarActor) || LidarActor->GetName() != Producer) { continue; }
+				ASimpleLidar* SimpleLidar = Cast<ASimpleLidar>(LidarActor);
+				if (SimpleLidar == nullptr) { return false; }
+				SimpleLidar->AddDataTarget(Target);
+				Target.Actor->AddTickPrerequisiteActor(LidarActor);
+				return true;
+			}
+			return false;
+		},
+		[this](FDataTarget& Target, const FString&)
+		{
+			bool bRemoved = false;
+			for (AActor* LidarActor : SpawnedActors)
+			{
+				if (ASimpleLidar* SimpleLidar = Cast<ASimpleLidar>(LidarActor))
+				{
+					SimpleLidar->RemoveDataTarget(Target);
+					Target.Actor->RemoveTickPrerequisiteActor(SimpleLidar);
+					bRemoved = true;
+				}
+			}
+			return bRemoved;
+		});
 }
 
 // Called when the game starts or when spawned
@@ -18,19 +53,46 @@ void ALidarSensorManager::BeginPlay()
 
 }
 
+void ALidarSensorManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (IsValid(GemstarSimulationSubsystem)){
+		GemstarSimulationSubsystem->UnregisterManager(this);
+		GemstarSimulationSubsystem = nullptr;
+	}
+
+	for (int32 i = SpawnedActors.Num() - 1; i >= 0; --i){
+		AActor* Sensor = SpawnedActors[i];
+		
+		if (!IsValid(Sensor)) {
+			continue;
+		}
+
+		RemoveTickPrerequisiteActor(Sensor);
+
+		Sensor->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors);
+		Sensor->Destroy();
+	}
+
+	SpawnedActors.Reset();
+	SensorConfiguration.Reset();
+
+	Super::EndPlay(EndPlayReason);
+}
+
 // Called every frame
 void ALidarSensorManager::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 }
 
-void ALidarSensorManager::Configure(TMap<FString, FInnerConfig> Configurations, AGEMSTARRoot* Root) {
-	GemstarRoot = Root;
 
-	for (const TPair<FName, FInnerConfig>& Pair : Configurations)
+void ALidarSensorManager::Configure(TMap<FString, FInnerConfig> Configurations, UGemstarSimulationSubsystem* SimulationSubsystem) {
+	GemstarSimulationSubsystem = SimulationSubsystem;
+
+	for (const TPair<FString, FInnerConfig>& Pair : Configurations)
 	{
 		FSensorConfigData config;
-		config.ID = Pair.Key;
+		config.ID = FName(Pair.Key);
 		if (const FString* ValueStr = Pair.Value.Entries.Find("Mount")) {
 			config.Mount = *ValueStr;
 		}
@@ -88,10 +150,23 @@ void ALidarSensorManager::Configure(TMap<FString, FInnerConfig> Configurations, 
 		{
 			FDefaultValueHelper::ParseDouble(*ValueStr, FoVVertical);
 		}
+		float distanceHalfFalloff = 0.0;
+		if (const FString* ValueStr = Pair.Value.Entries.Find("DistanceHalfFalloff"))
+		{
+			FDefaultValueHelper::ParseFloat(*ValueStr, distanceHalfFalloff);
+		}
+		if (const FString* ValueStr = Pair.Value.Entries.Find("WeatherInput"))
+		{
+			FDataTarget dt;
+			dt.Actor = this;
+			ConnectInputs(ValueStr, GemstarSimulationSubsystem, dt, GemstarInterfaceType::WEATHERDATA);
+		}
 		config.Lidar.NumberOfRaysHorizontal = width;
 		config.Lidar.NumberOfRaysVertical = height;
-		config.Lidar.FieldOfViewHorizontal = FoVHorizontal * PI / 180;
-		config.Lidar.FieldOfViewVertical = FoVVertical * PI / 180;
+		config.Lidar.FieldOfViewHorizontal = FMath::DegreesToRadians(FoVHorizontal);
+		config.Lidar.FieldOfViewVertical = FMath::DegreesToRadians(FoVVertical);
+		// DistanceHalfFalloff in Meter
+		config.Lidar.DistanceHalfFalloff = distanceHalfFalloff * 100.0f;
 		SensorConfiguration.Add(config);
 	}
 	for (auto& config : SensorConfiguration)
@@ -108,21 +183,25 @@ void ALidarSensorManager::SpawnSensor(FSensorConfigData& sensorConfiguration) {
 		params.Name = sensorConfiguration.ID;
 		ASimpleLidar* SpawnedActor = World->SpawnActor<ASimpleLidar>(ASimpleLidar::StaticClass(), FTransform(), params);
 		if (SpawnedActor == nullptr) {
-			UE_LOG(LogTemp, Log, TEXT("Lidar: Spawn failed for %s"), *SpawnedActor->GetName());
+			UE_LOG(Lidar, Log, TEXT("Lidar: Spawn failed for %s"), *SpawnedActor->GetName());
 			return;
 		}
 
-		SpawnedActor->setSensorConfiguration(sensorConfiguration);
+		SpawnedActor->SetSensorConfiguration(sensorConfiguration);
 
-		UE_LOG(LogTemp, Log, TEXT("Lidar: Spawned %s"), *SpawnedActor->GetName());
+		UE_LOG(Lidar, Log, TEXT("Lidar: Spawned %s"), *SpawnedActor->GetName());
 		if (!sensorConfiguration.Mount.IsEmpty()) {
-			IGEMSTARManager::Execute_MountOn(GemstarRoot, sensorConfiguration.Mount, SpawnedActor);
+			IGemstarManager::Execute_MountOn(GemstarSimulationSubsystem, sensorConfiguration.Mount, SpawnedActor);
 		}
 		else {
 			ILocalTransformUpdater::Execute_UpdateTransformAfterAttachment(SpawnedActor);
 		}
 		AddTickPrerequisiteActor(SpawnedActor);
 		SpawnedActors.Add(SpawnedActor);
+
+		if (bHasWeatherData) {
+			SpawnedActor->SetWeatherData(LatestWeatherData);
+		}
 	}
 }
 
@@ -146,28 +225,29 @@ void ALidarSensorManager::SpawnSensor_Implementation(FSensorConfigData& sensorCo
 
 		ASimpleLidar* SpawnedActor = World->SpawnActor<ASimpleLidar>(ASimpleLidar::StaticClass(), FTransform(), params);
 		SpawnedActor->AttachToActor(sensorConfiguration.Vehicle, FAttachmentTransformRules(EAttachmentRule::SnapToTarget, true));
-		SpawnedActor->setSensorConfiguration(sensorConfiguration);
+		SpawnedActor->SetSensorConfiguration(sensorConfiguration);
 		SpawnedActor->SetActorRelativeTransform(sensorConfiguration.Offset);
 
 		if (SpawnedActor)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Spawned sensor: %s"), *SpawnedActor->GetName());
+			UE_LOG(Lidar, Warning, TEXT("Spawned sensor: %s"), *SpawnedActor->GetName());
 			SpawnedActors.Add(SpawnedActor);
 		}
 	}
 }
 
-bool ALidarSensorManager::RegisterDataflow_Implementation(AActor* consumer, FString& producer, GEMSTARInterfaceType interfaceName) {
-	AActor* producerActor = nullptr;
+void ALidarSensorManager::WeatherDataUpdate_Implementation(FWeatherData& data, int32 targetIndex)
+{
+	LatestWeatherData = data;
+	bHasWeatherData = true;
+
 	for (auto& lidarActor : SpawnedActors) {
-		if (lidarActor->GetName() == producer) {
-			producerActor = lidarActor;
+		ASimpleLidar* SimpleLidar = Cast<ASimpleLidar>(lidarActor);
+
+		if (!SimpleLidar) {
+			continue;
 		}
+
+		SimpleLidar->SetWeatherData(LatestWeatherData);
 	}
-	if (producerActor == nullptr) {
-		return false;
-	}
-	dynamic_cast<ASimpleLidar*>(producerActor)->AddDataTarget(consumer);
-	consumer->AddTickPrerequisiteActor(producerActor);
-	return true;
 }

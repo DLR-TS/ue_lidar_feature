@@ -1,9 +1,18 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+/*
+ * Copyright (c) 2026 DLR e.V.
+ *
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ */
 
 #pragma once
 
-#include "SensorConfigurationData.h"
-#include "SensorConfigurationDispatcher.h"
+#include "LidarLog.h"
+#include "Interfaces/Sensor/SensorConfigurationData.h"
+#include "Interfaces/Sensor/SensorConfigurationDispatcher.h"
 #include "Engine/StaticMeshActor.h"
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -28,7 +37,7 @@ protected:
 
 	void UnregisterSensorSpawner_Implementation(AActor* spawner) override;
 
-	void SensorViewDataUpdate_Implementation(FSensorView& sensorViewData) override;
+	void SensorViewDataUpdate_Implementation(FSensorView& sensorViewData, int TargetIndex, UTextureRenderTarget2D* cameraRenderTarget) override;
 
 public:
 	// Called every frame
@@ -48,5 +57,8 @@ public:
 
 private:
 	TArray<AActor*> ActorsToInform;
-	int counter = 0;
+	bool bSensorSpawned = false;
+	bool bReportedWaiting = false;
+
+	AActor* FindSensorSpawner() const;
 };

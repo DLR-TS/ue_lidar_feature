@@ -1,19 +1,28 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+/*
+ * Copyright (c) 2026 DLR e.V.
+ *
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ */
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Kismet/KismetMathLibrary.h"
-#include "SensorConfigurationData.h"
-#include "SensorDataDispatcher.h"
-#include "LocalTransformUpdater.h"
+#include "Materials/Material.h"
+#include "PhysicsPublic.h"
+#include "Sensors/GemstarSensor.h"
 #include "Utils/ToOSI.h"
+#include "LidarLog.h"
 #include "osi_sensorview.pb.h"
 #include "osi_sensorviewconfiguration.pb.h"
 #include "SimpleLidar.generated.h"
 
-constexpr float SPEED_OF_LIGHT = 299792458.0f; // in m/s
+constexpr float SPEED_OF_LIGHT = 299705543.0f; //in m/s in air 299792458.0f in vakuum;
 
 USTRUCT()
 struct FHitResultAndIntesity
@@ -44,9 +53,7 @@ public:
 };
 
 UCLASS()
-class ASimpleLidar : public AActor,
-	public ISensorDataDispatcher,
-	public ILocalTransformUpdater
+class UE_LIDAR_FEATURERUNTIME_API ASimpleLidar : public AGemstarSensor
 {
 	GENERATED_BODY()
 
@@ -62,15 +69,12 @@ public:
 	bool bDebugNormals = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GEMSTAR")
 	bool SupportMultithread = true;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GEMSTAR")
 	float DistanceHalfFalloff = 2000.0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GEMSTAR")
+	float Range = 20.0;
 
-	UFUNCTION(BlueprintCallable, Category = "GEMSTAR")
-	void setSensorConfiguration(FSensorConfigData sensorConfiguration);
-
-	void AddDataTarget(AActor* dataTarget);
-	void UpdateTransformAfterAttachment_Implementation() override;
+	virtual void SetSensorConfiguration(FSensorConfigData NewSensorConfiguration) override;
 
 protected:
 	// Called when the game starts or when spawned
@@ -84,15 +88,19 @@ private:
 	UPROPERTY()
 	AActor* Parent = nullptr;
 
-	FSensorConfigData sensorConfiguration;
 	FSimpleLidarConfiguration Sensor;
 	FCollisionQueryParams TraceParams;
+
+	FWeatherData LatestWeatherData;
+
+	bool bReportedNoDataTarget = false;
 
 	void CreateTestConfig();
 	void ShowSensorDebugInformation();
 	void GenerateOSIMessage();
-	void SendData();
 	float ComputeLidarSignalStrength(
 		const FHitResult& Hit
 	);
+	UMaterialInterface* GetHitMaterial(const FHitResult& Hit) const;
+	float GetReflectivity(const UMaterialInterface* Material) const;
 };
