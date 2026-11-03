@@ -6,6 +6,8 @@
 
 - Removed logger from test map and changed sensor spawn position
 
+- Fixed spelling in README.md
+
 ## 2.0
 
 ### Added

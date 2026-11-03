@@ -19,9 +19,9 @@ The feature also supports an optional weather-based degradation of LiDAR perform
 ## Weather-dependent LiDAR degradation
 The `LidarWeatherEffectModel` provides an optional phenomenological weather degradation model for LiDAR reflections.
 
-The algorithem is based on the **vanishing distance approach** and **measurement-derived parameters** described in [ROADVIEW](https://roadview-project.eu/deliverables/) **D3.3 - Library of validated statistical noise models**.
+The algorithm is based on the **vanishing distance approach** and **measurement-derived parameters** described in [ROADVIEW](https://roadview-project.eu/deliverables/) **D3.3 - Library of validated statistical noise models**.
 
- Separate sets of parameters are provided for `Fog` , `Rain`, and `Snow`. The current implementation therefore applies only one adverse weather condition at a time:
+ Separate sets of parameters are provided for `Fog`, `Rain` and `Snow`. The current implementation therefore applies only one adverse weather condition at a time:
 - `Clear` - no weather dependent degradation
 - `Fog` - Fog vanishing distance model
 - `Rain` - Rain vanishing distance model
@@ -33,7 +33,7 @@ The weather degradation model processes LiDAR points individually and calculates
 ```text
 VanishingDistance = VanishingSlope * MOR
 ```
-Where `MOR` is **Meteorological Optical Range** in meters and represents the visibilty range under the respective weather condtion.
+Where `MOR` is **Meteorological Optical Range** in meters and represents the visibility range under the respective weather condition.
 
 In GEMSTAR the relation is generalized to:
 ```text
@@ -42,7 +42,7 @@ VanishingDistance = VanishingSlope * VisualRange * LidarCoefficient
 For Fog `VisualRange` corresponding directly to `MOR`. For Rain and Snow, an equivalent visual range is derived from the Precipitation intensity.
 `LidarCoefficient` is an optional correction factor. A default value `LidarCoefficient = 1.0` applies no addtional scaling.
 
-**vanishing Slope** depends on the weather condtion and LiDAR point reflectivity:
+**vanishing Slope** depends on the weather condition and LiDAR point reflectivity:
 
 | Weather | Reflectivity < 10 | Reflectivity >= 10  |
 |----------|----------|----------|
@@ -125,7 +125,7 @@ Then define the weather model according to the [ue_weather_effect_feature](https
 WeatherEffectEnabled=true
 ;Explisit weather degradation model: Clear, Fog, Rain, Snow
 ActiveWeatherType=Fog
-;Meteorological Optical Range in meters for fog condtion
+;Meteorological Optical Range in meters for fog condition
 MOR=15.0
 ;LiDAR weather-model parameters 
 LidarCoefficient=1.0
